@@ -2,7 +2,7 @@
 
 > **Disclaimer:** This is an educational/portfolio project only. Not a substitute for clinical diagnosis. Always consult a licensed physician.
 
-A full-stack medical AI web app that analyzes chest X-ray images and generates tailored recommendations for **children and pregnant women** using a CNN + RAG pipeline.
+A Steamlit medical AI web app that analyzes chest X-ray images and generates tailored recommendations for **children and pregnant women** using a CNN + RAG pipeline.
 
 ---
 
@@ -22,9 +22,8 @@ Browser → POST /analyze → Flask → CNN (.keras) + FAISS RAG + LLM → JSON 
 ## Project Structure
 
 ```
-your-project/
-├── app.py                    # Flask backend (CNN + RAG + LLM pipeline)
-├── index.html                # Frontend web interface
+PneumoScan/
+├── app.py                    # Streamlit (CNN + RAG + LLM pipeline)
 ├── requirements.txt          # Python dependencies
 ├── my_model_2.keras          # Your trained CNN model
 ├── 1_2_3_4_5_merged.pdf      # Medical knowledge base PDF
@@ -45,25 +44,31 @@ Edit the CONFIG section at the top:
 ```python
 CNN_MODEL_PATH   = "my_model_2.keras"
 IMAGE_SIZE       = (256, 256)
-PDF_PATHS        = ["1_2_3_4_5_merged.pdf"]
+PDF_PATHS        = ["final_used_pdf.pdf"]
 
-os.environ["OPENAI_API_KEY"] = "sk-or-v1-your-openrouter-key"
+os.environ["OPENAI_API_KEY"] = "sk-or-v1-openrouter-key"
 OPENROUTER_MODEL = "nvidia/nemotron-super-49b-v1"   # no :free suffix
 ```
 
-### 3. Add index route to `app.py`
-Add these lines just before `if __name__ == "__main__":` so Flask serves the HTML:
-```python
-from flask import send_from_directory
+### 3. Streamlit basic structure
+import streamlit as st
 
-@app.route("/")
-def index():
-    return send_from_directory(".", "index.html")
-```
+st.title("PneumoScan 🩺")
 
+st.write("Upload a chest X-ray to detect pneumonia")
+
+uploaded_file = st.file_uploader("Choose an image", type=["jpg", "png", "jpeg"])
+
+if uploaded_file is not None:
+    st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
+
+    # Your model prediction here
+    result = "Pneumonia Detected"  # replace with actual prediction
+
+    st.success(result)
 ### 4. Start the server
 ```bash
-python app.py
+streamlit run app.py
 ```
 
 ### 5. Open the app
@@ -98,13 +103,12 @@ Go to [http://localhost:5000](http://localhost:5000) in your browser.
 | Problem | Fix |
 |---|---|
 | Server error 500 | Check Flask terminal. Likely wrong OpenRouter model name (remove `:free`) or bad API key |
-| 404 on localhost:5000 | Add the index route to `app.py` (Step 3 above) |
-| Connection error in browser | Make sure `python app.py` is running on port 5000 |
+| 404 on localhost:5000 | Add the index route to `app_streamlit.py` (Step 3 above) |
+| Connection error in browser | Make sure `streamlit run app_streamlit.py` is running on port 5000 |
 | FAISS error | Delete `faiss_chest_index/` folder and restart — it rebuilds automatically |
 
 ---
 
 ## Author
 
-**Neeraj** — ML Portfolio Project  
-Focus: Computer Vision + NLP/LLM Applications
+**Neeraj Kumar** — Deep Learning and GenAI PortFolio Project

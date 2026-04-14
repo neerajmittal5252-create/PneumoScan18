@@ -1,5 +1,5 @@
 streamlit
-tensorflow==2.19.0
+tensorflow-cpu==2.19.0
 keras==3.13.2
 pillow
 numpy

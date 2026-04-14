@@ -108,8 +108,8 @@ CLASSES         = ["Normal", "Pneumonia"]
 PDF_PATHS       = ["1_2_3_4_5_merged.pdf"]
 FAISS_INDEX_DIR = "faiss_chest_index"
 
-os.environ["OPENAI_API_KEY"]           = "API-Token"
-os.environ["HUGGINGFACEHUB_API_TOKEN"] = "API-Token"
+os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+os.environ["HUGGINGFACEHUB_API_TOKEN"] = st.secrets["HUGGINGFACEHUB_API_TOKEN"]
 
 OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 OPENROUTER_BASE  = "https://openrouter.ai/api/v1"

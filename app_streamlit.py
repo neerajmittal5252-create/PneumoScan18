@@ -102,7 +102,6 @@ div[data-testid="stFileUploader"]:hover {
 # ─────────────────────────────────────────────
 # Config (edit these)
 # ─────────────────────────────────────────────
-# CNN_MODEL_PATH  = "my_model_2.keras"
 API_URL = "https://pneumoscan-model-api.onrender.com/predict"
 IMAGE_SIZE      = (256, 256)
 CLASSES         = ["Normal", "Pneumonia"]
@@ -155,15 +154,8 @@ Return a JSON object (no markdown, no backticks) with this exact structure:
 
 
 # ─────────────────────────────────────────────
-# Cached model / index loaders
+# Cached RAG loader
 # ─────────────────────────────────────────────
-@st.cache_resource(show_spinner="Loading CNN model…")
-def load_cnn():
-    import tensorflow as tf
-    model = tf.keras.models.load_model(CNN_MODEL_PATH)
-    return model
-
-
 @st.cache_resource(show_spinner="Loading embeddings & knowledge base…")
 def load_rag():
     from langchain_community.document_loaders import PyPDFLoader
@@ -204,15 +196,14 @@ def load_rag():
 # ─────────────────────────────────────────────
 # Helper functions
 # ─────────────────────────────────────────────
-def preprocess_xray(image_bytes: bytes) -> np.ndarray:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(IMAGE_SIZE)
-    arr = np.array(img, dtype=np.float32) / 255.0
-    return np.expand_dims(arr, axis=0)
+def classify_xray(image_bytes: bytes):
+    """Sends the image to the deployed Render API and returns the prediction."""
+    files = {"file": ("xray.jpg", image_bytes, "image/jpeg")}
+    response = requests.post(API_URL, files=files, timeout=60)
+    response.raise_for_status()
+    result = response.json()
 
-
-def classify_xray(image_bytes: bytes, cnn_model):
-    img_tensor = preprocess_xray(image_bytes)
-    raw = float(cnn_model.predict(img_tensor, verbose=0)[0][0])
+    raw = float(result["score"])
     pred_idx = int(raw > 0.5)
     condition = CLASSES[pred_idx]
     confidence = raw if pred_idx == 1 else (1.0 - raw)
@@ -274,7 +265,7 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown(
-        "<p style='font-size:.75rem;color:#484f58;'>Model: CNN + RAG (LangChain + FAISS)<br>"
+        "<p style='font-size:.75rem;color:#484f58;'>Model: CNN API (Render) + RAG (LangChain + FAISS)<br>"
         f"Embedding: {EMBEDDING_MODEL}<br>LLM: {OPENROUTER_MODEL}</p>",
         unsafe_allow_html=True,
     )
@@ -313,9 +304,12 @@ with col_preview:
 if analyze_btn and uploaded_file:
     image_bytes = uploaded_file.getvalue()
 
-    with st.spinner("Running CNN classifier…"):
-        cnn_model = load_cnn()
-        condition, confidence, all_probs = classify_xray(image_bytes, cnn_model)
+    with st.spinner("Running CNN classifier… (first request may take up to a minute if the API was asleep)"):
+        try:
+            condition, confidence, all_probs = classify_xray(image_bytes)
+        except requests.exceptions.RequestException as e:
+            st.error(f"Could not reach the model API: {e}")
+            st.stop()
 
     st.divider()
     st.markdown("### Classification Result")

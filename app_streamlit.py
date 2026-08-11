@@ -5,6 +5,7 @@ import re
 import numpy as np
 from PIL import Image
 import streamlit as st
+import requests
 
 # ─────────────────────────────────────────────
 # Page config  (must be first Streamlit call)
@@ -101,7 +102,8 @@ div[data-testid="stFileUploader"]:hover {
 # ─────────────────────────────────────────────
 # Config (edit these)
 # ─────────────────────────────────────────────
-CNN_MODEL_PATH  = "my_model_2.keras"
+# CNN_MODEL_PATH  = "my_model_2.keras"
+API_URL = "https://pneumoscan-model-api.onrender.com/predict"
 IMAGE_SIZE      = (256, 256)
 CLASSES         = ["Normal", "Pneumonia"]
 

@@ -110,11 +110,13 @@ PDF_PATHS       = ["1_2_3_4_5_merged.pdf"]
 FAISS_INDEX_DIR = "faiss_chest_index"
 
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-os.environ["HUGGINGFACEHUB_API_TOKEN"] = st.secrets["HUGGINGFACEHUB_API_TOKEN"]
 
 OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 OPENROUTER_BASE  = "https://openrouter.ai/api/v1"
-EMBEDDING_MODEL  = "BAAI/bge-base-en-v1.5"
+# Nemotron embedding model, served through OpenRouter's OpenAI-compatible
+# /embeddings endpoint. Runs remotely, so no torch/sentence-transformers
+# install is needed locally anymore.
+EMBEDDING_MODEL  = "nvidia/nemotron-3-embed-1b:free"
 
 PROMPT_TEMPLATE = """\
 You are a cautious, evidence-based medical assistant AI.
@@ -160,13 +162,14 @@ Return a JSON object (no markdown, no backticks) with this exact structure:
 def load_rag():
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_openai import OpenAIEmbeddings, ChatOpenAI
     from langchain_community.vectorstores import FAISS
-    from langchain_openai import ChatOpenAI
     from langchain_core.prompts import PromptTemplate
     from langchain_core.output_parsers import StrOutputParser
 
-    emb = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    # Embeddings now come from OpenRouter's Nemotron model over the network,
+    # instead of running sentence-transformers/torch locally.
+    emb = OpenAIEmbeddings(model=EMBEDDING_MODEL, base_url=OPENROUTER_BASE)
 
     if os.path.exists(FAISS_INDEX_DIR):
         vs = FAISS.load_local(FAISS_INDEX_DIR, emb, allow_dangerous_deserialization=True)

@@ -25,8 +25,8 @@ Browser → POST /analyze → Flask → CNN (.keras) + FAISS RAG + LLM → JSON 
 PneumoScan/
 ├── app.py                    # Streamlit (CNN + RAG + LLM pipeline)
 ├── requirements.txt          # Python dependencies
-├── my_model_2.keras          # Your trained CNN model
-├── 1_2_3_4_5_merged.pdf      # Medical knowledge base PDF
+├── model.keras          # Your trained CNN model
+├── final_used.pdf      # Medical knowledge base PDF
 └── faiss_chest_index/        # FAISS vector index (auto-generated on first run)
 ```
 

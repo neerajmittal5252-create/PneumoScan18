@@ -7,6 +7,7 @@ import time
 import requests
 from PIL import Image
 import streamlit as st
+from langchain_core.embeddings import Embeddings
 st.set_page_config(
     page_title="Chest X-Ray Analyzer",
     page_icon="🫁",

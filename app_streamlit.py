@@ -106,7 +106,7 @@ API_URL = "https://pneumoscan-model-api.onrender.com/predict"
 IMAGE_SIZE      = (256, 256)
 CLASSES         = ["Normal", "Pneumonia"]
 
-PDF_PATHS       = ["1_2_3_4_5_merged.pdf"]
+PDF_PATHS       = ["final_used_pdf.pdf"]
 FAISS_INDEX_DIR = "faiss_chest_index"
 
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]

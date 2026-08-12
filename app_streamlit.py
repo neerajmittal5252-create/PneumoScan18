@@ -3,7 +3,8 @@ import io
 import json
 import re
 import shutil
-import numpy as np
+import time
+import requests
 from PIL import Image
 import streamlit as st
 
@@ -12,7 +13,6 @@ st.set_page_config(
     page_icon="🫁",
     layout="wide",
 )
-
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
@@ -86,8 +86,8 @@ div[data-testid="stFileUploader"]:hover {
 }
 </style>
 """, unsafe_allow_html=True)
-CNN_MODEL_PATH = "my_model_2.keras"
-IMAGE_SIZE = (256, 256)
+
+MODEL_API_URL = "https://pneumoscan-model-api.onrender.com/predict"
 CLASSES = ["Normal", "Pneumonia"]
 PDF_PATHS = ["1_2_3_4_5_merged.pdf"]
 FAISS_INDEX_DIR = "faiss_chest_index"
@@ -130,7 +130,6 @@ Return a JSON object (no markdown, no backticks) with this exact structure:
   "disclaimer": "1-2 sentence safety note"
 }}
 """
-
 def _require_secret(key: str) -> str:
     try:
         value = st.secrets[key]
@@ -146,18 +145,11 @@ def _require_secret(key: str) -> str:
         st.stop()
     return value
 
-OPENAI_API_KEY = _require_secret("OPENAI_API_KEY")            
+OPENAI_API_KEY = _require_secret("OPENAI_API_KEY")          
 HF_TOKEN = _require_secret("HUGGINGFACEHUB_API_TOKEN")
 
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
-
-@st.cache_resource(show_spinner="Loading CNN model…")
-def load_cnn():
-    import tensorflow as tf
-    model = tf.keras.models.load_model(CNN_MODEL_PATH)
-    return model
-
 
 @st.cache_resource(show_spinner="Loading embeddings & knowledge base…")
 def load_rag():
@@ -168,6 +160,7 @@ def load_rag():
     from langchain_openai import ChatOpenAI
     from langchain_core.prompts import PromptTemplate
     from langchain_core.output_parsers import StrOutputParser
+
     emb = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
     def _build_index():
@@ -215,20 +208,63 @@ def load_rag():
     )
     chain = prompt | llm | StrOutputParser()
     return retriever, chain
+def classify_xray(image_bytes: bytes, filename: str = "xray.jpg"):
+    """
+    Calls the hosted FastAPI model at MODEL_API_URL/predict.
+    Request:  multipart/form-data, field name "file" -> image bytes
+    Response: JSON containing a class/label field and a confidence field,
+              e.g. {"class": "PNEUMONIA", "confidence": 0.87}
 
-def preprocess_xray(image_bytes: bytes) -> np.ndarray:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(IMAGE_SIZE)
-    arr = np.array(img, dtype=np.float32) / 255.0
-    return np.expand_dims(arr, axis=0)
+    Render's free tier spins containers down when idle, so the first call
+    after inactivity can take 30-60s to "cold start" — we retry a couple
+    of times with backoff instead of failing immediately on a timeout.
+    """
+    files = {"file": (filename, image_bytes, "image/jpeg")}
 
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(MODEL_API_URL, files=files, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            time.sleep(5 * (attempt + 1)) 
+    else:
+        raise RuntimeError(
+            f"Could not reach the model API at {MODEL_API_URL} after 3 attempts "
+            f"(it may be cold-starting on Render's free tier — try again in a moment). "
+            f"Last error: {last_err}"
+        )
+    label_raw = (
+        data.get("class")
+        or data.get("label")
+        or data.get("prediction")
+        or data.get("result")
+    )
+    if label_raw is None:
+        raise ValueError(f"Unexpected response shape from model API: {data}")
 
-def classify_xray(image_bytes: bytes, cnn_model):
-    img_tensor = preprocess_xray(image_bytes)
-    raw = float(cnn_model.predict(img_tensor, verbose=0)[0][0])
-    pred_idx = int(raw > 0.5)
-    condition = CLASSES[pred_idx]
-    confidence = raw if pred_idx == 1 else (1.0 - raw)
-    all_probs = {"Normal": round(1.0 - raw, 4), "Pneumonia": round(raw, 4)}
+    label_str = str(label_raw).strip().lower()
+    if label_str in ("1", "pneumonia", "true"):
+        condition = "Pneumonia"
+    elif label_str in ("0", "normal", "false"):
+        condition = "Normal"
+    else:
+        condition = next(
+            (c for c in CLASSES if c.lower() == label_str), str(label_raw)
+        )
+
+    conf_raw = data.get("confidence", data.get("probability", data.get("score")))
+    if conf_raw is None:
+        raise ValueError(f"Unexpected response shape from model API: {data}")
+    confidence = float(conf_raw)
+    if confidence > 1.0: 
+        confidence /= 100.0
+
+    pneu_conf = confidence if condition == "Pneumonia" else (1.0 - confidence)
+    all_probs = {"Normal": round(1.0 - pneu_conf, 4), "Pneumonia": round(pneu_conf, 4)}
     return condition, round(confidence, 4), all_probs
 
 
@@ -283,6 +319,7 @@ def run_rag_llm(condition, confidence, age, pregnant, retriever, chain) -> dict:
         fallback["summary"] = f"Raw model output could not be parsed: {raw[:300]}"
         return fallback
 
+
 st.markdown("# 🫁 Chest X-Ray Analyzer")
 st.markdown(
     "<p style='color:#8b949e;font-size:.9rem;margin-top:-.5rem;'>"
@@ -302,11 +339,10 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown(
-        "<p style='font-size:.75rem;color:#484f58;'>Model: CNN + RAG (LangChain + FAISS)<br>"
+        "<p style='font-size:.75rem;color:#484f58;'>Model: CNN via hosted API + RAG (LangChain + FAISS)<br>"
         f"Embedding: {EMBEDDING_MODEL}<br>LLM: {OPENROUTER_MODEL}</p>",
         unsafe_allow_html=True,
     )
-
 col_upload, col_preview = st.columns([1, 1], gap="large")
 
 with col_upload:
@@ -334,14 +370,14 @@ with col_preview:
             "Preview will appear here</div>",
             unsafe_allow_html=True,
         )
-
 if analyze_btn and uploaded_file:
     image_bytes = uploaded_file.getvalue()
 
     try:
-        with st.spinner("Running CNN classifier…"):
-            cnn_model = load_cnn()
-            condition, confidence, all_probs = classify_xray(image_bytes, cnn_model)
+        with st.spinner("Running CNN classifier (calling model API)…"):
+            condition, confidence, all_probs = classify_xray(
+                image_bytes, filename=uploaded_file.name
+            )
     except Exception as e:
         st.error(f"CNN classification failed: {e}")
         st.stop()
@@ -383,6 +419,7 @@ if analyze_btn and uploaded_file:
         f"border-radius:4px;transition:width .6s ease'></div></div>",
         unsafe_allow_html=True,
     )
+
     st.divider()
     st.markdown("### 📋 Medical Report")
 

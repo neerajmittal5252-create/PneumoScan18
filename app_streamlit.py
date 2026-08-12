@@ -2,34 +2,25 @@ import os
 import io
 import json
 import re
+import shutil
 import numpy as np
 from PIL import Image
 import streamlit as st
-import requests
 
-# ─────────────────────────────────────────────
-# Page config  (must be first Streamlit call)
-# ─────────────────────────────────────────────
 st.set_page_config(
     page_title="Chest X-Ray Analyzer",
     page_icon="🫁",
     layout="wide",
 )
 
-# ─────────────────────────────────────────────
-# Custom CSS
-# ─────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
 html, body, [class*="css"] {
     font-family: 'IBM Plex Sans', sans-serif;
 }
 h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
-
 .stApp { background: #0d1117; color: #c9d1d9; }
-
 .card {
     background: #161b22;
     border: 1px solid #30363d;
@@ -46,10 +37,9 @@ h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
     font-weight: 600;
     letter-spacing: .04em;
 }
-.pill-normal   { background:#0d3321; color:#3fb950; border:1px solid #238636; }
+.pill-normal { background:#0d3321; color:#3fb950; border:1px solid #238636; }
 .pill-pneumonia{ background:#3d1c1c; color:#f85149; border:1px solid #da3633; }
-.pill-warning  { background:#2d2000; color:#e3b341; border:1px solid #9e6a03; }
-
+.pill-warning { background:#2d2000; color:#e3b341; border:1px solid #9e6a03; }
 .metric-box {
     background:#0d1117;
     border:1px solid #21262d;
@@ -59,7 +49,6 @@ h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; }
 }
 .metric-label { font-size:.72rem; color:#8b949e; text-transform:uppercase; letter-spacing:.08em; }
 .metric-value { font-size:1.6rem; font-family:'IBM Plex Mono',monospace; font-weight:600; color:#58a6ff; }
-
 .med-chip {
     display:inline-block;
     background:#1c2d45;
@@ -97,26 +86,15 @@ div[data-testid="stFileUploader"]:hover {
 }
 </style>
 """, unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────
-# Config (edit these)
-# ─────────────────────────────────────────────
-API_URL = "https://pneumoscan-model-api.onrender.com/predict"
-IMAGE_SIZE      = (256, 256)
-CLASSES         = ["Normal", "Pneumonia"]
-
-PDF_PATHS       = ["final_used_pdf.pdf"]
+CNN_MODEL_PATH = "my_model_2.keras"
+IMAGE_SIZE = (256, 256)
+CLASSES = ["Normal", "Pneumonia"]
+PDF_PATHS = ["1_2_3_4_5_merged.pdf"]
 FAISS_INDEX_DIR = "faiss_chest_index"
 
-os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-
 OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
-OPENROUTER_BASE  = "https://openrouter.ai/api/v1"
-# Nemotron embedding model, served through OpenRouter's OpenAI-compatible
-# /embeddings endpoint. Runs remotely, so no torch/sentence-transformers
-# install is needed locally anymore.
-EMBEDDING_MODEL  = "nvidia/nemotron-3-embed-1b:free"
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
 
 PROMPT_TEMPLATE = """\
 You are a cautious, evidence-based medical assistant AI.
@@ -133,15 +111,14 @@ STRICT RULES:
 ━━━━━━━━━━━━━━━━━━━━━━
 PATIENT PROFILE:
 - Detected Condition : {condition}
-- CNN Confidence     : {confidence}%
-- Patient Age        : {age} years old
-- Pregnant           : {pregnant}
+- CNN Confidence      : {confidence}%
+- Patient Age         : {age} years old
+- Pregnant            : {pregnant}
 ━━━━━━━━━━━━━━━━━━━━━━
-
 KNOWLEDGE BASE CONTEXT:
 {context}
-
 ━━━━━━━━━━━━━━━━━━━━━━
+
 Return a JSON object (no markdown, no backticks) with this exact structure:
 {{
   "summary": "2-3 sentences explaining the detected condition",
@@ -154,29 +131,55 @@ Return a JSON object (no markdown, no backticks) with this exact structure:
 }}
 """
 
+def _require_secret(key: str) -> str:
+    try:
+        value = st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        st.error(
+            f"Missing secret `{key}`. Add it in Streamlit Cloud → "
+            f"**Manage app → Settings → Secrets** (or `.streamlit/secrets.toml` locally), "
+            f"e.g.\n\n```toml\n{key} = \"...\"\n```"
+        )
+        st.stop()
+    if not value:
+        st.error(f"Secret `{key}` is set but empty.")
+        st.stop()
+    return value
 
-# ─────────────────────────────────────────────
-# Cached RAG loader
-# ─────────────────────────────────────────────
+OPENAI_API_KEY = _require_secret("OPENAI_API_KEY")            
+HF_TOKEN = _require_secret("HUGGINGFACEHUB_API_TOKEN")
+
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
+
+@st.cache_resource(show_spinner="Loading CNN model…")
+def load_cnn():
+    import tensorflow as tf
+    model = tf.keras.models.load_model(CNN_MODEL_PATH)
+    return model
+
+
 @st.cache_resource(show_spinner="Loading embeddings & knowledge base…")
 def load_rag():
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+    from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_community.vectorstores import FAISS
+    from langchain_openai import ChatOpenAI
     from langchain_core.prompts import PromptTemplate
     from langchain_core.output_parsers import StrOutputParser
+    emb = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
-    # Embeddings now come from OpenRouter's Nemotron model over the network,
-    # instead of running sentence-transformers/torch locally.
-    emb = OpenAIEmbeddings(model=EMBEDDING_MODEL, base_url=OPENROUTER_BASE)
-
-    if os.path.exists(FAISS_INDEX_DIR):
-        vs = FAISS.load_local(FAISS_INDEX_DIR, emb, allow_dangerous_deserialization=True)
-    else:
+    def _build_index():
         all_docs = []
         for p in PDF_PATHS:
+            if not os.path.exists(p):
+                raise FileNotFoundError(
+                    f"Knowledge-base PDF not found: {p}. "
+                    f"Make sure it's committed to the repo root."
+                )
             all_docs.extend(PyPDFLoader(p).load())
+
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=600, chunk_overlap=120,
             separators=["\n\n", "\n", ". ", " ", ""],
@@ -184,10 +187,28 @@ def load_rag():
         chunks = splitter.split_documents(all_docs)
         vs = FAISS.from_documents(chunks, emb)
         vs.save_local(FAISS_INDEX_DIR)
+        return vs
+
+    if os.path.exists(FAISS_INDEX_DIR):
+        try:
+            vs = FAISS.load_local(
+                FAISS_INDEX_DIR, emb, allow_dangerous_deserialization=True
+            )
+        except Exception:
+            shutil.rmtree(FAISS_INDEX_DIR, ignore_errors=True)
+            vs = _build_index()
+    else:
+        vs = _build_index()
 
     retriever = vs.as_retriever(search_type="similarity", search_kwargs={"k": 4})
 
-    llm = ChatOpenAI(model=OPENROUTER_MODEL, base_url=OPENROUTER_BASE, temperature=0.4)
+    llm = ChatOpenAI(
+        model=OPENROUTER_MODEL,
+        base_url=OPENROUTER_BASE,
+        api_key=OPENAI_API_KEY,
+        temperature=0.4,
+    )
+
     prompt = PromptTemplate(
         input_variables=["condition", "confidence", "context", "age", "pregnant"],
         template=PROMPT_TEMPLATE,
@@ -195,18 +216,15 @@ def load_rag():
     chain = prompt | llm | StrOutputParser()
     return retriever, chain
 
+def preprocess_xray(image_bytes: bytes) -> np.ndarray:
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(IMAGE_SIZE)
+    arr = np.array(img, dtype=np.float32) / 255.0
+    return np.expand_dims(arr, axis=0)
 
-# ─────────────────────────────────────────────
-# Helper functions
-# ─────────────────────────────────────────────
-def classify_xray(image_bytes: bytes):
-    """Sends the image to the deployed Render API and returns the prediction."""
-    files = {"file": ("xray.jpg", image_bytes, "image/jpeg")}
-    response = requests.post(API_URL, files=files, timeout=60)
-    response.raise_for_status()
-    result = response.json()
 
-    raw = float(result["score"])
+def classify_xray(image_bytes: bytes, cnn_model):
+    img_tensor = preprocess_xray(image_bytes)
+    raw = float(cnn_model.predict(img_tensor, verbose=0)[0][0])
     pred_idx = int(raw > 0.5)
     condition = CLASSES[pred_idx]
     confidence = raw if pred_idx == 1 else (1.0 - raw)
@@ -218,6 +236,20 @@ def format_docs(docs) -> str:
     return "\n\n---\n\n".join(
         f"[Page {d.metadata.get('page', '?')}]\n{d.page_content}" for d in docs
     )
+
+
+_FALLBACK_REPORT = {
+    "summary": "The AI report could not be generated (see error above). "
+                "Please retry, or consult a physician directly.",
+    "severity": "Not available.",
+    "medicines": [],
+    "treatmentText": "Not available.",
+    "specialConsiderations": "Not available.",
+    "emergencySigns": "Seek emergency care for severe shortness of breath, "
+                       "chest pain, bluish lips/face, confusion, or high fever "
+                       "that doesn't respond to treatment.",
+    "disclaimer": "Always consult a qualified doctor.",
+}
 
 
 def run_rag_llm(condition, confidence, age, pregnant, retriever, chain) -> dict:
@@ -240,12 +272,17 @@ def run_rag_llm(condition, confidence, age, pregnant, retriever, chain) -> dict:
 
     clean = raw.replace("```json", "").replace("```", "").strip()
     match = re.search(r'\{.*\}', clean, re.DOTALL)
-    return json.loads(match.group() if match else clean)
+    try:
+        return json.loads(match.group() if match else clean)
+    except (json.JSONDecodeError, AttributeError):
+        st.warning(
+            "The model didn't return valid JSON, so a fallback report is shown below. "
+            "You can try clicking **Analyze X-Ray** again."
+        )
+        fallback = dict(_FALLBACK_REPORT)
+        fallback["summary"] = f"Raw model output could not be parsed: {raw[:300]}"
+        return fallback
 
-
-# ─────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────
 st.markdown("# 🫁 Chest X-Ray Analyzer")
 st.markdown(
     "<p style='color:#8b949e;font-size:.9rem;margin-top:-.5rem;'>"
@@ -253,13 +290,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.divider()
-
-# ── Sidebar ──────────────────────────────────
 with st.sidebar:
     st.markdown("### Patient Profile")
     age = st.number_input("Age (years)", min_value=0, max_value=120, value=30, step=1)
     pregnant = st.checkbox("Pregnant", value=False)
-
     st.markdown("---")
     st.markdown(
         "<div class='disclaimer-box'>⚠️ This tool is for informational purposes only. "
@@ -268,12 +302,11 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown(
-        "<p style='font-size:.75rem;color:#484f58;'>Model: CNN API (Render) + RAG (LangChain + FAISS)<br>"
+        "<p style='font-size:.75rem;color:#484f58;'>Model: CNN + RAG (LangChain + FAISS)<br>"
         f"Embedding: {EMBEDDING_MODEL}<br>LLM: {OPENROUTER_MODEL}</p>",
         unsafe_allow_html=True,
     )
 
-# ── Main area ────────────────────────────────
 col_upload, col_preview = st.columns([1, 1], gap="large")
 
 with col_upload:
@@ -283,9 +316,8 @@ with col_upload:
         type=["jpg", "jpeg", "png"],
         label_visibility="collapsed",
     )
-
     analyze_btn = st.button(
-        "🔬  Analyze X-Ray",
+        "🔬 Analyze X-Ray",
         type="primary",
         disabled=uploaded_file is None,
         use_container_width=True,
@@ -303,23 +335,22 @@ with col_preview:
             unsafe_allow_html=True,
         )
 
-# ── Analysis ─────────────────────────────────
 if analyze_btn and uploaded_file:
     image_bytes = uploaded_file.getvalue()
 
-    with st.spinner("Running CNN classifier… (first request may take up to a minute if the API was asleep)"):
-        try:
-            condition, confidence, all_probs = classify_xray(image_bytes)
-        except requests.exceptions.RequestException as e:
-            st.error(f"Could not reach the model API: {e}")
-            st.stop()
+    try:
+        with st.spinner("Running CNN classifier…"):
+            cnn_model = load_cnn()
+            condition, confidence, all_probs = classify_xray(image_bytes, cnn_model)
+    except Exception as e:
+        st.error(f"CNN classification failed: {e}")
+        st.stop()
 
     st.divider()
     st.markdown("### Classification Result")
 
     pill_class = "pill-normal" if condition == "Normal" else "pill-pneumonia"
     col1, col2, col3 = st.columns(3)
-
     with col1:
         st.markdown(
             f"<div class='metric-box'><div class='metric-label'>Detected Condition</div>"
@@ -343,7 +374,6 @@ if analyze_btn and uploaded_file:
             unsafe_allow_html=True,
         )
 
-    # Confidence bar
     st.markdown("<br>", unsafe_allow_html=True)
     bar_color = "#3fb950" if condition == "Normal" else "#f85149"
     st.markdown(
@@ -353,16 +383,23 @@ if analyze_btn and uploaded_file:
         f"border-radius:4px;transition:width .6s ease'></div></div>",
         unsafe_allow_html=True,
     )
-
-    # ── RAG Report ───────────────────────────
     st.divider()
     st.markdown("### 📋 Medical Report")
 
-    with st.spinner("Retrieving knowledge base & generating report…"):
-        retriever, chain = load_rag()
-        report = run_rag_llm(condition, confidence, age, pregnant, retriever, chain)
+    try:
+        with st.spinner("Retrieving knowledge base & generating report…"):
+            retriever, chain = load_rag()
+            report = run_rag_llm(condition, confidence, age, pregnant, retriever, chain)
+    except Exception as e:
+        st.error(
+            f"Report generation failed: {e}\n\n"
+            f"If this mentions an embeddings/API format error, verify `OPENAI_API_KEY` "
+            f"in secrets is a valid **OpenRouter** key (starts with `sk-or-v1-`) and that "
+            f"no code path routes text embedding through the OpenRouter/NVIDIA chat "
+            f"endpoint — embeddings must go through `HuggingFaceEmbeddings`, not `ChatOpenAI`."
+        )
+        report = dict(_FALLBACK_REPORT)
 
-    # Summary & Severity
     c_left, c_right = st.columns(2)
     with c_left:
         st.markdown(
@@ -377,7 +414,6 @@ if analyze_btn and uploaded_file:
             unsafe_allow_html=True,
         )
 
-    # Medicines
     meds = report.get("medicines", [])
     if meds:
         chips = "".join(f"<span class='med-chip'>{m}</span>" for m in meds)
@@ -386,8 +422,6 @@ if analyze_btn and uploaded_file:
             f"<div style='margin-top:.3rem'>{chips}</div></div>",
             unsafe_allow_html=True,
         )
-
-    # Treatment, Special Considerations, Emergency Signs
     for label, key in [
         ("Treatment Guidance", "treatmentText"),
         ("Special Considerations", "specialConsiderations"),
@@ -402,13 +436,11 @@ if analyze_btn and uploaded_file:
             unsafe_allow_html=True,
         )
 
-    # Disclaimer
     st.markdown(
         f"<div class='disclaimer-box'>{report.get('disclaimer','Always consult a qualified doctor.')}</div>",
         unsafe_allow_html=True,
     )
 
-    # Download JSON
     st.markdown("<br>", unsafe_allow_html=True)
     full_result = {
         "condition": condition,
@@ -418,7 +450,7 @@ if analyze_btn and uploaded_file:
         **report,
     }
     st.download_button(
-        label="⬇️  Download Report (JSON)",
+        label="⬇️ Download Report (JSON)",
         data=json.dumps(full_result, indent=2),
         file_name="xray_report.json",
         mime="application/json",

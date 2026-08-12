@@ -89,7 +89,7 @@ div[data-testid="stFileUploader"]:hover {
 
 MODEL_API_URL = "https://pneumoscan-model-api.onrender.com/predict"
 CLASSES = ["Normal", "Pneumonia"]
-PDF_PATHS = ["1_2_3_4_5_merged.pdf"]
+PDF_PATHS = ["final_used_pdf.pdf"]
 FAISS_INDEX_DIR = "faiss_chest_index"
 
 OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"

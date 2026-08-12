@@ -149,7 +149,7 @@ def _require_secret(key: str) -> str:
 OPENAI_API_KEY = _require_secret("OPENAI_API_KEY")           
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
-class OpenRouterEmbeddings:
+class OpenRouterEmbeddings(Embeddings):
     """Minimal LangChain-compatible Embeddings implementation
     (embed_documents / embed_query) backed by OpenRouter's /embeddings API."""
 

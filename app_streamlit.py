@@ -7,12 +7,12 @@ import time
 import requests
 from PIL import Image
 import streamlit as st
-
 st.set_page_config(
     page_title="Chest X-Ray Analyzer",
     page_icon="🫁",
     layout="wide",
 )
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
@@ -94,7 +94,7 @@ FAISS_INDEX_DIR = "faiss_chest_index"
 
 OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
+EMBEDDING_MODEL = "nvidia/nemotron-3-embed-1b:free"
 
 PROMPT_TEMPLATE = """\
 You are a cautious, evidence-based medical assistant AI.
@@ -130,6 +130,7 @@ Return a JSON object (no markdown, no backticks) with this exact structure:
   "disclaimer": "1-2 sentence safety note"
 }}
 """
+
 def _require_secret(key: str) -> str:
     try:
         value = st.secrets[key]
@@ -145,23 +146,60 @@ def _require_secret(key: str) -> str:
         st.stop()
     return value
 
-OPENAI_API_KEY = _require_secret("OPENAI_API_KEY")          
-HF_TOKEN = _require_secret("HUGGINGFACEHUB_API_TOKEN")
-
+OPENAI_API_KEY = _require_secret("OPENAI_API_KEY")           
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
+
+class OpenRouterEmbeddings:
+    """Minimal LangChain-compatible Embeddings implementation
+    (embed_documents / embed_query) backed by OpenRouter's /embeddings API."""
+
+    def __init__(self, model: str, api_key: str,
+                 base_url: str = OPENROUTER_BASE,
+                 batch_size: int = 64, timeout: int = 60):
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.batch_size = batch_size
+        self.timeout = timeout
+
+    def _embed_batch(self, texts):
+        resp = requests.post(
+            f"{self.base_url}/embeddings",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": self.model, "input": texts},
+            timeout=self.timeout,
+        )
+        if not resp.ok:
+            raise RuntimeError(
+                f"OpenRouter embeddings request failed ({resp.status_code}): {resp.text[:300]}"
+            )
+        data = resp.json()
+        return [item["embedding"] for item in data["data"]]
+
+    def embed_documents(self, texts):
+        texts = list(texts)
+        out = []
+        for i in range(0, len(texts), self.batch_size):
+            out.extend(self._embed_batch(texts[i:i + self.batch_size]))
+        return out
+
+    def embed_query(self, text):
+        return self._embed_batch([text])[0]
+
 
 @st.cache_resource(show_spinner="Loading embeddings & knowledge base…")
 def load_rag():
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_community.vectorstores import FAISS
     from langchain_openai import ChatOpenAI
     from langchain_core.prompts import PromptTemplate
     from langchain_core.output_parsers import StrOutputParser
 
-    emb = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    emb = OpenRouterEmbeddings(model=EMBEDDING_MODEL, api_key=OPENAI_API_KEY)
 
     def _build_index():
         all_docs = []
@@ -208,6 +246,7 @@ def load_rag():
     )
     chain = prompt | llm | StrOutputParser()
     return retriever, chain
+
 def classify_xray(image_bytes: bytes, filename: str = "xray.jpg"):
     """
     Calls the hosted FastAPI model at MODEL_API_URL/predict.
@@ -230,13 +269,14 @@ def classify_xray(image_bytes: bytes, filename: str = "xray.jpg"):
             break
         except requests.exceptions.RequestException as e:
             last_err = e
-            time.sleep(5 * (attempt + 1)) 
+            time.sleep(5 * (attempt + 1))  
     else:
         raise RuntimeError(
             f"Could not reach the model API at {MODEL_API_URL} after 3 attempts "
             f"(it may be cold-starting on Render's free tier — try again in a moment). "
             f"Last error: {last_err}"
         )
+
     label_raw = (
         data.get("class")
         or data.get("label")
@@ -260,7 +300,7 @@ def classify_xray(image_bytes: bytes, filename: str = "xray.jpg"):
     if conf_raw is None:
         raise ValueError(f"Unexpected response shape from model API: {data}")
     confidence = float(conf_raw)
-    if confidence > 1.0: 
+    if confidence > 1.0:  
         confidence /= 100.0
 
     pneu_conf = confidence if condition == "Pneumonia" else (1.0 - confidence)
@@ -319,7 +359,6 @@ def run_rag_llm(condition, confidence, age, pregnant, retriever, chain) -> dict:
         fallback["summary"] = f"Raw model output could not be parsed: {raw[:300]}"
         return fallback
 
-
 st.markdown("# 🫁 Chest X-Ray Analyzer")
 st.markdown(
     "<p style='color:#8b949e;font-size:.9rem;margin-top:-.5rem;'>"
@@ -327,6 +366,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.divider()
+
 with st.sidebar:
     st.markdown("### Patient Profile")
     age = st.number_input("Age (years)", min_value=0, max_value=120, value=30, step=1)
@@ -343,6 +383,7 @@ with st.sidebar:
         f"Embedding: {EMBEDDING_MODEL}<br>LLM: {OPENROUTER_MODEL}</p>",
         unsafe_allow_html=True,
     )
+
 col_upload, col_preview = st.columns([1, 1], gap="large")
 
 with col_upload:
@@ -370,6 +411,7 @@ with col_preview:
             "Preview will appear here</div>",
             unsafe_allow_html=True,
         )
+
 if analyze_btn and uploaded_file:
     image_bytes = uploaded_file.getvalue()
 
@@ -419,7 +461,6 @@ if analyze_btn and uploaded_file:
         f"border-radius:4px;transition:width .6s ease'></div></div>",
         unsafe_allow_html=True,
     )
-
     st.divider()
     st.markdown("### 📋 Medical Report")
 
@@ -430,10 +471,10 @@ if analyze_btn and uploaded_file:
     except Exception as e:
         st.error(
             f"Report generation failed: {e}\n\n"
-            f"If this mentions an embeddings/API format error, verify `OPENAI_API_KEY` "
+            f"If this mentions an embeddings format error, verify `OPENAI_API_KEY` "
             f"in secrets is a valid **OpenRouter** key (starts with `sk-or-v1-`) and that "
-            f"no code path routes text embedding through the OpenRouter/NVIDIA chat "
-            f"endpoint — embeddings must go through `HuggingFaceEmbeddings`, not `ChatOpenAI`."
+            f"`EMBEDDING_MODEL` ({EMBEDDING_MODEL}) is still listed as an active embeddings "
+            f"model on OpenRouter — free models occasionally get rotated out."
         )
         report = dict(_FALLBACK_REPORT)
 
@@ -459,6 +500,7 @@ if analyze_btn and uploaded_file:
             f"<div style='margin-top:.3rem'>{chips}</div></div>",
             unsafe_allow_html=True,
         )
+
     for label, key in [
         ("Treatment Guidance", "treatmentText"),
         ("Special Considerations", "specialConsiderations"),
@@ -477,7 +519,6 @@ if analyze_btn and uploaded_file:
         f"<div class='disclaimer-box'>{report.get('disclaimer','Always consult a qualified doctor.')}</div>",
         unsafe_allow_html=True,
     )
-
     st.markdown("<br>", unsafe_allow_html=True)
     full_result = {
         "condition": condition,

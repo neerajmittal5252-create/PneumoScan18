@@ -72,7 +72,7 @@ streamlit run app.py
 ```
 
 ### 5. Open the app
-Go to [http://localhost:5000](https://pneumoscan18.streamlit.app/) in your browser.
+Go to [PneumoScan Project](https://pneumoscan18.streamlit.app/) in your browser.
 
 ---
 

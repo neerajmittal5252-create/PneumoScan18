@@ -93,9 +93,9 @@ CLASSES = ["Normal", "Pneumonia"]
 PDF_PATHS = ["final_used_pdf.pdf"]
 FAISS_INDEX_DIR = "faiss_chest_index"
 
-OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+OPENROUTER_MODEL = "nvidia/nemotron-3.5-super-vl:free"
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-EMBEDDING_MODEL = "nvidia/nemotron-3-embed-1b:free"
+EMBEDDING_MODEL = "nvidia/nemotron-3.5-embed-8b:free"
 
 PROMPT_TEMPLATE = """\
 You are a cautious, evidence-based medical assistant AI.
